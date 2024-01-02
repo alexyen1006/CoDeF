@@ -220,14 +220,14 @@ class AnnealedHash(nn.Module):
 class ImplicitVideo(nn.Module):
     def __init__(self,
                  D=8, W=256,
-                 in_channels_xyz=34,
+                 in_channels_xy_sigma=34,
                  skips=[4],
-                 out_channels=3,
+                 out_channels=4,
                  sigmoid_offset=0):
         """
         D: number of layers for density (sigma) encoder
         W: number of hidden units in each layer
-        in_channels_xyz: number of input channels for xyz (3+3*8*2=51 by default)
+        in_channels_xy_sigma: number of input channels for xyz (3+3*8*2=51 by default)
         skips: add skip connection in the Dth layer
 
         ------ for nerfies ------
@@ -237,29 +237,29 @@ class ImplicitVideo(nn.Module):
         super(ImplicitVideo, self).__init__()
         self.D = D
         self.W = W
-        self.in_channels_xyz = in_channels_xyz
+        self.in_channels_xy_sigma = in_channels_xy_sigma
         self.skips = skips
-        self.in_channels_xyz = self.in_channels_xyz
+        self.in_channels_xy_sigma = self.in_channels_xy_sigma
         self.sigmoid_offset = sigmoid_offset
 
         # xyz encoding layers
         for i in range(D):
             if i == 0:
-                layer = nn.Linear(self.in_channels_xyz, W)
+                layer = nn.Linear(self.in_channels_xy_sigma, W)
             elif i in skips:
-                layer = nn.Linear(W+self.in_channels_xyz, W)
+                layer = nn.Linear(W+self.in_channels_xy_sigma, W)
             else:
                 layer = nn.Linear(W, W)
             init_weights(layer)
             layer = nn.Sequential(layer, nn.ReLU(True))
-            setattr(self, f"xyz_encoding_{i+1}", layer)
-        self.xyz_encoding_final = nn.Linear(W, W)
-        init_weights(self.xyz_encoding_final)
+            setattr(self, f"xy_sigma_encoding_{i+1}", layer)
+        self.xy_sigma_encoding_final = nn.Linear(W, W)
+        init_weights(self.xy_sigma_encoding_final)
 
         # output layers
-        self.rgb = nn.Sequential(nn.Linear(W, out_channels))
+        self.rgb_sigma = nn.Sequential(nn.Linear(W, out_channels))
 
-        self.rgb.apply(init_weights)
+        self.rgb_sigma.apply(init_weights)
 
     def forward(self, x):
         """
@@ -267,10 +267,10 @@ class ImplicitVideo(nn.Module):
         For rendering this ray, please see rendering.py
 
         Inputs:
-            x: (B, self.in_channels_xyz)
+            x: (B, self.in_channels_xy_sigma)
                the embedded vector of position and direction
             sigma_only: whether to infer sigma only. If True,
-                        x is of shape (B, self.in_channels_xyz)
+                        x is of shape (B, self.in_channels_xy_sigma)
 
         Outputs:
             if sigma_ony:
@@ -278,18 +278,18 @@ class ImplicitVideo(nn.Module):
             else:
                 out: (B, 4), rgb and sigma
         """
-        input_xyz = x
+        input_xy_sigma = x
 
-        xyz_ = input_xyz
+        xyz_ = input_xy_sigma
         for i in range(self.D):
             if i in self.skips:
-                xyz_ = torch.cat([input_xyz, xyz_], -1)
-            xyz_ = getattr(self, f"xyz_encoding_{i+1}")(xyz_)
+                xy_sigma = torch.cat([input_xy_sigma, xy_sigma], -1)
+            xy_sigma = getattr(self, f"xy_sigma_encoding_{i+1}")(xy_sigma)
 
-        xyz_encoding_final = self.xyz_encoding_final(xyz_)
-        out = self.rgb(xyz_encoding_final)
+        xy_sigma_encoding_final = self.xyz_encoding_final(xy_sigma)
+        out = self.rgb_sigma(xy_sigma_encoding_final)
 
-        out = torch.sigmoid(out) - self.sigmoid_offset
+        out[:,:3] = torch.sigmoid(out[:,:3]) - self.sigmoid_offset
 
         return out
 
@@ -301,7 +301,7 @@ class ImplicitVideo_Hash(nn.Module):
                                      encoding_config=config["encoding"])
         self.decoder = tcnn.Network(n_input_dims=self.encoder.n_output_dims +
                                     2,
-                                    n_output_dims=3,
+                                    n_output_dims=4,
                                     network_config=config["network"])
 
     def forward(self, x):
@@ -319,7 +319,7 @@ class Deform_Hash3d(nn.Module):
         self.encoder = tcnn.Encoding(n_input_dims=3,
                                      encoding_config=config["encoding_deform3d"])
         self.decoder = tcnn.Network(n_input_dims=self.encoder.n_output_dims + 3,
-                                    n_output_dims=2,
+                                    n_output_dims=3,
                                     network_config=config["network_deform"])
 
     def forward(self, x, step=0, aneal_func=None):

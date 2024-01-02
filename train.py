@@ -15,6 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 from datasets import dataset_dict
 from losses import loss_dict
 from losses import compute_gradient_loss
+from losses import visualize_uncertainty_numpy
 
 from models.implicit_model import TranslationField
 from models.implicit_model import ImplicitVideo
@@ -47,6 +48,7 @@ class ImplicitVideoSystem(LightningModule):
             self.video_visualizer = VideoVisualizer(fps=hparams.fps)
             self.raw_video_visualizer = VideoVisualizer(fps=hparams.fps)
             self.dual_video_visualizer = VideoVisualizer(fps=hparams.fps)
+            self.uncertainty_video_visualizer = VideoVisualizer(fps=hparams.fps)
 
         self.models_to_train=[]
         self.embedding_xyz = Embedding(2, 8)
@@ -152,8 +154,13 @@ class ImplicitVideoSystem(LightningModule):
             else:
                 deform = self.models[f'warping_field_{i}'](input_xyt)
             if encode_w:
+                zero = torch.zeros(grid.shape[0], 1, device=grid.device)
+                grid = torch.cat([grid, zero], dim=-1)
+                assert grid.shape == deform.shape
                 deformed_grid = deform + grid
             else:
+                sigma = deform[:,2].unsqueeze(1)
+                grid = torch.cat([grid, sigma], dim=-1)
                 deformed_grid = grid
         else:
             if encode_w:
@@ -170,6 +177,8 @@ class ImplicitVideoSystem(LightningModule):
                     [e_w, pe_w], 1))
                 deformed_grid = deform + grid
             else:
+                sigma = deform[:,2].unsqueeze(1)
+                grid = torch.cat([grid, sigma], dim=-1)
                 deformed_grid = grid
 
         return deformed_grid
@@ -186,9 +195,16 @@ class ImplicitVideoSystem(LightningModule):
         results_list = []
         flow_loss_list = []
         deform_list = []
+        sigma_xy_list = []
+        sigma_rgb_list = []
         for i in range(self.num_models):
             deformed_grid = self.deform_pts(ts_w, grid, encode_w, step, i)  # [batch * num_pixels, 2]
-            deform_list.append(deformed_grid)
+            sigma_xy = deformed_grid[:,2]
+            
+            deform_list.append(deformed_grid[:,:2])
+            #intentionaly add sigma to sigma_list beacause loss computation we also need sigma here
+            sigma_xy_list.append(sigma_xy)
+
             # Compute optical flow loss.
             flow_loss = 0
             if self.hparams.flow_loss > 0 and not self.hparams.test:
@@ -196,17 +212,17 @@ class ImplicitVideoSystem(LightningModule):
                     grid_new = grid + flows.squeeze(0)
                     deformed_grid_new = self.deform_pts(
                         ts_w + 1, grid_new, encode_w, step, i)
-                    flow_loss = (deformed_grid_new, deformed_grid)
+                    flow_loss = (deformed_grid_new[:,:2], deformed_grid[:,:2])
             flow_loss_list.append(flow_loss)
             if self.hparams.vid_hash:
-                pe_deformed_grid = (deformed_grid + 0.3) / 1.6
+                pe_deformed_grid = (deformed_grid[:,:2] + 0.3) / 1.6
             else:
-                pe_deformed_grid = self.embeddings['xyz'](deformed_grid)
+                pe_deformed_grid = self.embeddings['xyz'](deformed_grid[:,:2])
             if not self.training and self.hparams.canonical_dir is not None:
                 w, h = self.img_wh
                 canonical_img = self.canonical_img.squeeze(0)
                 h_c, w_c = canonical_img.shape[1:3]
-                grid_new = deformed_grid.clone()
+                grid_new = deformed_grid[:,:2].clone()
                 grid_new[..., 1] = (2 * deformed_grid[..., 0] - 1) * h / h_c
                 grid_new[..., 0] = (2 * deformed_grid[..., 1] - 1) * w / w_c
                 if len(canonical_img.shape) == 3:
@@ -219,13 +235,17 @@ class ImplicitVideoSystem(LightningModule):
                 results = results.squeeze().permute(1,0)
             else:
                 results = self.models[f'implicit_video_{i}'](pe_deformed_grid)
-
+                sigma_rgb = results[:,3]
+                results = results[:,:3]
+            
             results_list.append(results)
+            sigma_rgb_list.append(sigma_rgb)
 
         ret = edict(rgbs=results_list,
                     flow_loss=flow_loss_list,
-                    deform=deform_list)
-
+                    deform=deform_list,
+                    sigmas_xy = sigma_xy_list,
+                    sigmas_rgb = sigma_rgb_list)
         return ret
 
     def setup(self, stage):
@@ -315,6 +335,8 @@ class ImplicitVideoSystem(LightningModule):
         # Loss computation.
         for i in range(self.num_models):
             results = ret.rgbs[i]
+            sigmas_xy = ret.sigmas_xy[i]
+            sigmas_rgb = ret.sigmas_rgb[i]
             mk_t = rearrange(mk[i], 'b h w c -> (b h w) c')
             mk_t = mk_t.sum(dim=-1) > 0.05
 
@@ -335,11 +357,11 @@ class ImplicitVideoSystem(LightningModule):
 
             if self.hparams.bg_loss and self.hparams.mask_dir:
                 loss = loss + self.hparams.bg_loss * self.color_loss(
-                    results[mk1], grid_flattened[mk1])
+                    results[mk1], sigmas_rgb[mk1], grid_flattened[mk1])
 
             # MSE color loss.
-            loss = loss + self.color_loss(results[mk_t],
-                                            rgbs_flattend[mk_t])
+            loss = loss + self.color_loss(results[mk_t],sigmas_rgb[mk_t],
+                                             rgbs_flattend[mk_t])
 
             # Image gradient loss.
             img_pred = rearrange(results,
@@ -368,6 +390,9 @@ class ImplicitVideoSystem(LightningModule):
                 loss = loss + torch.nn.functional.l1_loss(
                     ret.flow_loss[i][0][mk_flow_t], ret.flow_loss[i][1]
                     [mk_flow_t]) * self.hparams.flow_loss
+                # flow_loss = 0.5 * (torch.abs(ret.flow_loss[i][0][mk_flow_t] - ret.flow_loss[i][1][mk_flow_t])).mean(-1) * torch.exp(-sigmas_xy[mk_flow_t]) + 0.5 * sigmas_xy[mk_flow_t]
+                # flow_loss = flow_loss.mean()
+                # loss = loss + flow_loss * self.hparams.flow_loss
 
             # Reference loss.
             if (self.hparams.ref_idx is not None
@@ -451,6 +476,8 @@ class ImplicitVideoSystem(LightningModule):
                 test_dir, f'{video_name}_raw.mp4'))
             self.dual_video_visualizer.set_path(os.path.join(
                 test_dir, f'{video_name}_dual.mp4'))
+            self.uncertainty_video_visualizer.set_path(os.path.join(
+                test_dir, f'{video_name}_uncer.mp4'))
 
         if batch_idx == 0 and self.hparams.canonical_dir is None:
             # Save the canonical image.
@@ -459,6 +486,7 @@ class ImplicitVideoSystem(LightningModule):
         ret_n = self(ts_w, grid, self.hparams.encode_w, self.global_step)
 
         img = np.zeros((H * W, 3), dtype=np.float32)
+        img_uncertainty = np.zeros((H * W, 1), dtype=np.float32)
         for i in range(self.num_models):
             if batch_idx == 0 and self.hparams.canonical_dir is None:
                 results_c = ret.rgbs[i]
@@ -476,13 +504,23 @@ class ImplicitVideoSystem(LightningModule):
             mk_n = mk_n.sum(dim=-1) > 0.05
             mk_n = mk_n.cpu().numpy()
             results = ret_n.rgbs[i]
+            uncertainty = ret_n.sigmas_rgb[i]
             results = results.cpu().numpy()  # (3, H, W)
+            uncertainty = uncertainty.cpu().numpy()
             img[mk_n] = results[mk_n]
+            uncertainty = uncertainty.reshape(-1,1)
+            img_uncertainty[mk_n] = uncertainty[mk_n]
 
         img = rearrange(img, '(h w) c -> h w c', h=H, w=W)
         img = img * 255
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         cv2.imwrite(f'{test_dir}/{batch_idx:05d}.png', img)
+
+        uncertainty_map = img_uncertainty.reshape(H,W)
+        print("right here: ",uncertainty_map.shape)
+        print("uncertainty_map:",uncertainty_map)
+        uncertainty_map,_ = visualize_uncertainty_numpy(uncertainty_map)
+        cv2.imwrite(f'{test_dir}/{batch_idx:05d}_uncertainty.png', uncertainty_map)
 
         if batch_idx > 0 and self.hparams.save_video:
             img = img[..., ::-1]
@@ -492,6 +530,8 @@ class ImplicitVideoSystem(LightningModule):
             self.raw_video_visualizer.add(rgbs)
             dual_img = np.concatenate((rgbs, img), axis=1)
             self.dual_video_visualizer.add(dual_img)
+            uncertainty_map = uncertainty_map[..., ::-1]
+            self.uncertainty_video_visualizer.add(uncertainty_map)
 
         if self.hparams.save_deform:
             save_deform_dir = f'{test_dir}_deform'
@@ -509,6 +549,7 @@ class ImplicitVideoSystem(LightningModule):
             self.video_visualizer.save()
             self.raw_video_visualizer.save()
             self.dual_video_visualizer.save()
+            self.uncertainty_video_visualizer.save()
 
     def get_progress_bar_dict(self):
         items = super().get_progress_bar_dict()
@@ -549,6 +590,7 @@ def main(hparams):
     if hparams.test:
         trainer.test(system, dataloaders=system.test_dataloader())
     else:
+        print("Start training...",hparams.ckpt_path)
         trainer.fit(system, ckpt_path=hparams.ckpt_path)
 
 

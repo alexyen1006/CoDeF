@@ -10,8 +10,9 @@ class MSELoss(nn.Module):
         self.coef = coef
         self.loss = nn.MSELoss(reduction='mean')
 
-    def forward(self, inputs, targets):
-        loss = self.loss(inputs, targets)
+    def forward(self, inputs, sigmas, targets):        
+        loss = 0.5 * ((inputs - targets) ** 2).mean(-1) * torch.exp(-sigmas) + 0.5 * sigmas
+        loss = loss.mean()
         return self.coef * loss
 
 
@@ -49,3 +50,21 @@ def compute_gradient_loss(pred, gt, mask):
 
 
 loss_dict = {'mse': MSELoss}
+
+import cv2
+import numpy as np
+def visualize_uncertainty_numpy(sigma, minmax=None, cmap=cv2.COLORMAP_JET):
+    """
+    sigma: (H, W)
+    """
+    x = np.nan_to_num(sigma) # change nan to 0
+    if minmax is None:
+        mi = np.min(x) # get minimum positive sigma (ignore background)
+        ma = np.max(x)
+    else:
+        mi,ma = minmax
+
+    x = (x-mi)/(ma-mi+1e-8) # normalize to 0~1
+    x = (255*x).astype(np.uint8)
+    x_ = cv2.applyColorMap(x, cmap)
+    return x_, [mi,ma]
