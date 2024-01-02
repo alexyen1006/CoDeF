@@ -46,4 +46,23 @@ events.*
 all_sequences/
 ckpts/
 logs/
+
 # configs/
+nir/
+
+
+#ignore raft
+RAFT/
+
+
+#ignore 
+DAVIS/
+
+#ignore
+docs/
+
+#ignore
+all_sequences_all_data/
+
+#ignore
+data_preprocessing/
