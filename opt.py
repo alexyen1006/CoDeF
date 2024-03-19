@@ -61,6 +61,8 @@ def get_opts():
                         help='save checkpoint to')
     parser.add_argument('--log_save_path', type=str, default='logs',
                         help='save log to')
+    parser.add_argument('--real_fill_path', type=str, default='real',
+                        help='save real fill to')
     parser.add_argument('--exp_name', type=str, default='exp',
                         help='experiment name')
 

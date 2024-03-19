@@ -15,6 +15,30 @@ class MSELoss(nn.Module):
         loss = loss.mean()
         return self.coef * loss
 
+def uncer_consis(sigmas,mk_t):
+    mask = mk_t == 1
+    
+    # Apply slicing to ensure compatible shapes for element-wise operations
+    sigmas_slice = sigmas[1:-1, 1:-1]  # Use the appropriate slicing based on your reshaped arrays
+    
+    # Compute absolute differences with neighboring pixels
+    var = (np.abs(sigmas_slice - sigmas[:-2, 1:-1]) +
+           np.abs(sigmas_slice - sigmas[2:, 1:-1]) +
+           np.abs(sigmas_slice - sigmas[1:-1, :-2]) +
+           np.abs(sigmas_slice - sigmas[1:-1, 2:]))
+    
+    # Apply mask to select relevant pixels
+    var = var[mask[1:-1, 1:-1]]
+    
+    # Compute loss and count of relevant pixels
+    loss = np.sum(var) / 4
+    cnt = np.sum(mask)
+    
+    # Normalize the loss
+    loss /= (cnt + 1e-8)
+    
+    return loss
+
 
 def rgb_to_gray(image):
     gray_image = (0.299 * image[:, 0, :, :] + 0.587 * image[:, 1, :, :] +

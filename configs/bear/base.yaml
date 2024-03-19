@@ -9,15 +9,22 @@ bg_loss: 0.003
 ref_idx: null # 0
 
 N_xyz_w: [8,]
-flow_loss: 10
+flow_loss: 1
 flow_step: -1
+
+uncertain_mask : True
+uncertain_mask_rgb : False
+
+uncertain_flow_loss : True
+uncertain_flow_loss_reg_term : 0.5
+uncertain_consis : True
 self_bg: True
 
 deform_hash: True
 vid_hash: True
 
-num_steps: 10000
-decay_step: [2500, 5000, 7500]
+num_steps: 15000
+decay_step: [2500, 5000, 7500,10000,12500,15000]
 annealed_begin_step: 4000
 annealed_step: 4000
 save_model_iters: 2000

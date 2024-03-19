@@ -348,3 +348,18 @@ def list_images_from_dir(directory):
         if check_file_ext(filename, *IMAGE_EXTENSIONS):
             image_list.append(os.path.join(directory, filename))
     return sorted(image_list)
+
+
+def find_largest_reg(mask):
+    # Connected component labeling
+    mask = mask.astype(np.uint8)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+    # Find the largest region
+    largest_region_label = np.argmax(stats[1:, cv2.CC_STAT_AREA]) + 1  # Skip background label
+    largest_region_mask = (labels == largest_region_label).astype(np.uint8) * 255
+
+    # Output the mask for the largest region
+    # cv2.imwrite('largest_region_mask.png', largest_region_mask)
+
+    return largest_region_mask

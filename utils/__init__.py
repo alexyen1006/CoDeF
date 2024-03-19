@@ -78,6 +78,8 @@ def extract_model_state_dict(ckpt_path, model_name='model', prefixes_to_ignore=[
     checkpoint = torch.load(ckpt_path, map_location=torch.device('cpu'))
     checkpoint_ = {}
     if 'state_dict' in checkpoint: # if it's a pytorch-lightning checkpoint
+        print('loading pytorch-lightning checkpoint')
+        print(checkpoint.keys())
         checkpoint = checkpoint['state_dict']
     for k, v in checkpoint.items():
         if not k.startswith(model_name):
